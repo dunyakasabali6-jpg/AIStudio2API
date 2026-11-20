@@ -2,6 +2,7 @@ name: Checks
 
 on:
   pull_request:
+    branches: [main]
   workflow_dispatch:
   push:
     branches: [main, northflank-lite]
@@ -31,7 +32,7 @@ jobs:
         working-directory: web
         run: |
           npm ci
-          npx vp build
+          npm run build
       - uses: actions/upload-artifact@v7
         with:
           name: frontend
@@ -86,10 +87,25 @@ jobs:
           target: linux-amd64-gnu
       - name: Run Unit Tests
         if: matrix.check == 'test'
-        run: go test -mod=readonly -trimpath -tags northflank -vet=off ./cmd/... ./internal/...
+        run: go test -mod=readonly -trimpath -tags northflank -vet=off ./...
       - name: Check Minimum Go Version
         if: matrix.check == 'vet'
         run: |
           go version
           go vet -mod=readonly -trimpath -tags northflank ./...
           go build -mod=readonly -trimpath -tags northflank ./cmd/aistudio2api
+
+  container-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v3
+      - name: Build Northflank container image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          tags: aistudio2api:northflank-ci
+          cache-from: type=gha,scope=northflank-container
+          cache-to: type=gha,mode=max,scope=northflank-container
