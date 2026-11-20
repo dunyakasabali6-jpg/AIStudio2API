@@ -54,9 +54,6 @@ jobs:
           npm ci
           npm run typecheck
           npm run lint
-          npm run format
-          git diff -- src/components/SettingsPanel.vue
-          git checkout -- .
           npm run format:check
 
   checks:
