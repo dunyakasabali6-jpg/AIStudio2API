@@ -165,9 +165,7 @@ const capacityLocked = computed(() => {
 })
 
 // capacityLimit 是 SpiderMonkey 容器 Worker 滑块的上限，账户数或输入的峰值更大时取其值
-const capacityLimit = computed(() =>
-  Math.max(4, props.accounts.length, form.max_active_workers),
-)
+const capacityLimit = computed(() => Math.max(4, props.accounts.length, form.max_active_workers))
 
 // setWorkerRange 把滑块的两端写回常驻数与峰值上限
 function setWorkerRange(range: number[] | undefined): void {
