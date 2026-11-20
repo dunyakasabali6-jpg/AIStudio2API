@@ -42,20 +42,14 @@ func Run(args []string) int {
 	}
 	logs := &logOutput{dir: filepath.Join("runtime", "logs")}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(logs, nil)))
-	executable, executableErr := os.Executable()
-	restart, err := runCommand(args, logs, executable)
+	executable, _ := os.Executable()
+	_, err := runCommand(args, logs, executable)
 	if errors.Is(err, flag.ErrHelp) {
 		return 0
 	}
 	if err != nil {
 		slog.Error("AIStudio2API 启动失败", "error", err)
 		return 1
-	}
-	if restart {
-		if err := errors.Join(executableErr, relaunch(executable, args)); err != nil {
-			slog.Error("AIStudio2API 重新启动失败", "error", err)
-			return 1
-		}
 	}
 	return 0
 }
