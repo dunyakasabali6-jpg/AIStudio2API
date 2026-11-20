@@ -23,7 +23,6 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/i18n"
 	"github.com/Mag1cFall/AIStudio2API/internal/promptdb"
 	"github.com/Mag1cFall/AIStudio2API/internal/requestdb"
-	"github.com/Mag1cFall/AIStudio2API/internal/setup"
 	"github.com/Mag1cFall/AIStudio2API/internal/statedb"
 	"github.com/Mag1cFall/AIStudio2API/internal/webui"
 	"github.com/klauspost/compress/gzhttp"
@@ -79,9 +78,6 @@ func runCommand(args []string, logs *logOutput, executable string) (restart bool
 	ctx, cancel := context.WithCancel(signals)
 	defer cancel()
 
-	if len(args) != 0 && args[0] == "setup" {
-		return false, setup.Run(ctx, cfg, args[1:])
-	}
 	options, err := parseFlags(args, &cfg)
 	if err != nil {
 		return false, err
