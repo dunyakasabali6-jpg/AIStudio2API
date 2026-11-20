@@ -75,6 +75,9 @@ func bootstrapAccounts(store *aistudio.AccountStore, accounts []*aistudio.Accoun
 			return nil, fmt.Errorf("bootstrap account %s cannot sign AI Studio requests: %w", email, err)
 		}
 		accountConfig := aistudio.DefaultAccountConfig(email)
+		// Bootstrap runs before account-specific geo settings are available; use stable defaults.
+		accountConfig.Locale = "en-US"
+		accountConfig.Timezone = "UTC"
 		if err := accountConfig.Validate(); err != nil {
 			return nil, fmt.Errorf("bootstrap account %s: %w", email, err)
 		}
