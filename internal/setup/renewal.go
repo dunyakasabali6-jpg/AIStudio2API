@@ -1,3 +1,5 @@
+//go:build !northflank
+
 package setup
 
 import (
