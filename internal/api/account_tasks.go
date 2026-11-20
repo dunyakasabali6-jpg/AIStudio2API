@@ -5,12 +5,10 @@ import (
 	"crypto/rand"
 	"net/http"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
-	"github.com/Mag1cFall/AIStudio2API/internal/chromeauth"
 )
 
 // AccountTask 是在服务端运行的添加或重新登录账户任务，管理页关闭或刷新后继续运行，结束后保留到用户关闭
@@ -31,22 +29,10 @@ type AccountTaskItem struct {
 	Error string `json:"error,omitempty"`
 }
 
-// chromeImportRequest 是从本机 Chrome 导入的账号与共用的账户环境
-type chromeImportRequest struct {
-	Accounts []struct {
-		ID    string `json:"id"`
-		Email string `json:"email"`
-	} `json:"accounts"`
-	Proxy    string `json:"proxy"`
-	Locale   string `json:"locale"`
-	Timezone string `json:"timezone"`
-}
-
-// cookieImportItem 是 Cookie 导入中的一个账户：识别出的邮箱、Cookie 文本或浏览器调试地址与会话序号
+// cookieImportItem 是 Cookie 导入中的一个账户：识别出的邮箱、Cookie 文本与会话序号
 type cookieImportItem struct {
 	Email    string `json:"email"`
 	Cookies  string `json:"cookies"`
-	CDP      string `json:"cdp"`
 	AuthUser int    `json:"auth_user"`
 }
 
@@ -262,31 +248,6 @@ func (s *server) handleLoginAccount(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleImportChromeAccounts 在账户任务中同时导入选中的本机 Chrome 账号，各账号独立保存
-func (s *server) handleImportChromeAccounts(w http.ResponseWriter, r *http.Request) {
-	var input chromeImportRequest
-	if err := decodeJSON(r, &input); err != nil {
-		writeAdminError(w, http.StatusBadRequest, "invalid_request", err.Error())
-		return
-	}
-	task := AccountTask{Kind: "chrome", Items: make([]AccountTaskItem, len(input.Accounts))}
-	for index, account := range input.Accounts {
-		task.Items[index] = AccountTaskItem{Label: account.Email, State: "pending"}
-	}
-	s.startAccountTask(w, r, task, func(ctx context.Context, update accountTaskUpdate) {
-		runAccountTaskItems(ctx, update, len(input.Accounts), func(index int) (AdminAccount, error) {
-			accounts, err := s.config.Admin.ImportChromeAccounts(ctx, ChromeImportInput{
-				AccountIDs: []string{input.Accounts[index].ID},
-				Proxy:      input.Proxy, Locale: input.Locale, Timezone: input.Timezone,
-			})
-			if err != nil {
-				return AdminAccount{}, err
-			}
-			return accounts[0], nil
-		})
-	})
-}
-
 // handleImportCookieAccounts 在账户任务中同时导入 Cookie 文本或调试浏览器中的账户，各账户独立保存
 func (s *server) handleImportCookieAccounts(w http.ResponseWriter, r *http.Request) {
 	var input cookieImportRequest
@@ -297,9 +258,6 @@ func (s *server) handleImportCookieAccounts(w http.ResponseWriter, r *http.Reque
 	task := AccountTask{Kind: "cookies", Items: make([]AccountTaskItem, len(input.Items))}
 	for index, item := range input.Items {
 		task.Items[index] = AccountTaskItem{Label: item.Email, State: "pending"}
-		if strings.TrimSpace(item.CDP) != "" {
-			task.Kind = "browser"
-		}
 	}
 	s.startAccountTask(w, r, task, func(ctx context.Context, update accountTaskUpdate) {
 		runAccountTaskItems(ctx, update, len(input.Items), func(index int) (AdminAccount, error) {
@@ -310,15 +268,7 @@ func (s *server) handleImportCookieAccounts(w http.ResponseWriter, r *http.Reque
 
 // importCookieAccount 读取调试浏览器的 Cookie 或解析 Cookie 文本，以识别会话时得到的邮箱为标签导入第 auth_user 个会话登录的账户
 func (s *server) importCookieAccount(ctx context.Context, item cookieImportItem, proxy string, locale string, timezone string) (AdminAccount, error) {
-	cookies := item.Cookies
-	if address := strings.TrimSpace(item.CDP); address != "" {
-		browser, err := chromeauth.ReadCDPBrowser(ctx, address)
-		if err != nil {
-			return AdminAccount{}, err
-		}
-		cookies = browser.Cookies
-	}
-	state, err := aistudio.ParseCookieText(cookies)
+	state, err := aistudio.ParseCookieText(item.Cookies)
 	if err != nil {
 		return AdminAccount{}, err
 	}

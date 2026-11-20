@@ -13,3 +13,41 @@ func TestValidateProxyCredentials(t *testing.T) {
 		t.Error("空用户名被接受")
 	}
 }
+
+func TestServerDefaultsUseSmallSpiderMonkeyProfile(t *testing.T) {
+	cfg := Default()
+	if cfg.WAABackend != WAABackendSpiderMonkey {
+		t.Fatalf("WAA backend = %q, want %q", cfg.WAABackend, WAABackendSpiderMonkey)
+	}
+	if cfg.WarmWorkerLimit != 1 || cfg.MaxActiveWorkers != 2 || cfg.WarmStartupConcurrency != 1 || cfg.PerAccountConcurrency != 1 {
+		t.Fatalf("worker defaults = warm:%d active:%d startup:%d per-account:%d, want 1/2/1/1",
+			cfg.WarmWorkerLimit, cfg.MaxActiveWorkers, cfg.WarmStartupConcurrency, cfg.PerAccountConcurrency)
+	}
+	if cfg.LogFile {
+		t.Fatal("LogFile default = true, want false for container profile")
+	}
+}
+
+func TestCamoufoxBackendIsRejected(t *testing.T) {
+	cfg := Default()
+	if err := setWAABackend(&cfg, WAABackendCamoufox); err == nil {
+		t.Fatal("setWAABackend(camoufox) error = nil, want unsupported backend error")
+	}
+	if cfg.WAABackend != WAABackendSpiderMonkey {
+		t.Fatalf("WAA backend after rejected value = %q, want SpiderMonkey", cfg.WAABackend)
+	}
+}
+
+func TestAdminAuthenticationRequiresProxyAPIKey(t *testing.T) {
+	cfg := Default()
+	cfg.AdminAuthEnabled = true
+	cfg.AdminUsername = "admin"
+	cfg.AdminPassword = "strong-password"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want missing PROXY_API_KEY error")
+	}
+	cfg.ProxyAPIKey = "separate-api-key"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with API key error = %v", err)
+	}
+}

@@ -1,4 +1,4 @@
-package chromeauth
+package cookieauth
 
 import (
 	"bytes"

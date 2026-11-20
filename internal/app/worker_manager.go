@@ -28,7 +28,6 @@ type accountWorkerManager struct {
 	requests       *requestRegistry
 	refresher      *authRuntimeRefresher
 	proxyFailed    func(proxy string, accountID string, err error)
-	camoufox       string
 	globalProxy    string
 	initTimeout    time.Duration
 	warmTarget     atomic.Int64
@@ -194,7 +193,6 @@ func newAccountWorkerManager(
 	pool *aistudio.AccountPool,
 	accounts []*aistudio.Account,
 	requests *requestRegistry,
-	camoufoxPath string,
 	globalProxy string,
 	initTimeout time.Duration,
 	warmTarget int,
@@ -203,7 +201,7 @@ func newAccountWorkerManager(
 ) *accountWorkerManager {
 	lifecycle, cancel := context.WithCancel(context.Background())
 	manager := &accountWorkerManager{
-		pool: pool, accounts: make(map[string]*accountWorker, len(accounts)), requests: requests, camoufox: camoufoxPath,
+		pool: pool, accounts: make(map[string]*accountWorker, len(accounts)), requests: requests,
 		globalProxy: globalProxy, initTimeout: initTimeout,
 		openings:  make(map[string]chan struct{}),
 		lifecycle: lifecycle, cancel: cancel, signal: make(chan struct{}), dispatch: newDispatchQueue(),
@@ -219,7 +217,7 @@ func newAccountWorkerManager(
 	return manager
 }
 
-// SetCapacity 设置常驻 Worker 数、峰值 Worker 上限与 Camoufox 启动并发，随后关闭超出峰值上限的空闲 Worker
+// SetCapacity 设置常驻 Worker 数、峰值 Worker 上限与启动并发，随后关闭超出峰值上限的空闲 Worker
 func (manager *accountWorkerManager) SetCapacity(warmTarget int, maxActive int, startupConcurrency int) {
 	manager.setLimits(warmTarget, maxActive, startupConcurrency)
 	manager.dispatch.wakeHeads()
@@ -229,11 +227,8 @@ func (manager *accountWorkerManager) SetCapacity(warmTarget int, maxActive int, 
 	}()
 }
 
-// setLimits 保存 Worker 数量上限，纯 Go 后端同时启动的 Worker 数只受峰值上限约束
+// setLimits 保存 Worker 数量上限与启动并发
 func (manager *accountWorkerManager) setLimits(warmTarget int, maxActive int, startupConcurrency int) {
-	if manager.camoufox == "" {
-		startupConcurrency = maxActive
-	}
 	manager.warmTarget.Store(int64(warmTarget))
 	manager.maxActive.Store(int64(maxActive))
 	manager.startup.setLimit(max(startupConcurrency, 1))
@@ -664,7 +659,6 @@ func (manager *accountWorkerManager) workerConfigFor(
 		proxy = account.PoolProxy(manager.globalProxy)
 	}
 	return camoufoxnative.Options{
-		ExecutablePath:   manager.camoufox,
 		StorageStatePath: account.StoragePath,
 		Locale:           config.Locale,
 		Timezone:         config.Timezone,

@@ -18,7 +18,6 @@ import (
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
-	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 )
 
@@ -36,6 +35,10 @@ func newRuntime(
 	requests.logStage("service", "INFO", api.LogStage{Name: "运行时装配", Step: 1, Steps: 3}, "载入账户")
 	store := aistudio.NewAccountStore(strings.Split(cfg.AuthStates, ",")...)
 	accounts, err := store.Load()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	accounts, err = bootstrapAccounts(store, accounts, requests)
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -64,7 +67,7 @@ func newRuntime(
 		globalProxy = proxyList[0]
 	}
 	cfg.Proxy = strings.Join(proxyList, ",")
-	camoufoxPath, login := prepareWAABackend(cfg, requests, accounts, globalProxy)
+	login := prepareWAABackend(cfg, requests, accounts)
 	requests.logStage("service", "INFO", api.LogStage{Name: "运行时装配", Step: 3, Steps: 3}, "创建协议客户端", egress...)
 	pool := aistudio.NewAccountPool(accounts, cfg.PerAccountConcurrency)
 	pool.SetRoutingStrategy(cfg.RoutingStrategy)
@@ -77,7 +80,7 @@ func newRuntime(
 		return nil, nil, nil, err
 	}
 	workers := newAccountWorkerManager(
-		pool, accounts, requests, camoufoxPath, globalProxy, cfg.InitTimeout,
+		pool, accounts, requests, globalProxy, cfg.InitTimeout,
 		cfg.WarmWorkerLimit, cfg.MaxActiveWorkers, cfg.WarmStartupConcurrency,
 	)
 	transport, err := aistudio.NewMakerSuiteHTTPTransport(aistudio.HTTPTransportOptions{
@@ -115,9 +118,6 @@ func newRuntime(
 	service.discoverHiddenModels = cfg.DiscoverHiddenModels
 	mapping, _ := config.ParseModelMapping(cfg.ModelMapping)
 	service.SetRequestPolicy(mapping, cfg.MaxAccountSwitches)
-	if camoufoxPath != "" {
-		service.camoufoxProxy, service.camoufoxWait = globalProxy, make(chan struct{})
-	}
 	admin := newRuntimeAdmin(lifecycle, pool, store, service, requests, login, workers, cfg)
 	admin.proxies, admin.globalProxy = proxies, globalProxy
 	service.proxies, service.rebindAccounts = proxies, admin.rebindAccounts
@@ -130,7 +130,6 @@ func newRuntime(
 	closeRuntime := func() error {
 		stopProbe()
 		err := workers.Close()
-		camoufoxnative.WaitRetired()
 		transport.CloseIdleConnections()
 		return err
 	}
@@ -188,10 +187,6 @@ type trackedService struct {
 	disconnects disconnectTracker
 	// discoverHiddenModels 表示同步账户目录时探测官网隐藏模型
 	discoverHiddenModels bool
-	// camoufoxWait 在 Camoufox 后端的启动开始等待 Camoufox 下载时关闭，SpiderMonkey 后端为 nil
-	camoufoxWait chan struct{}
-	// camoufoxProxy 是 Camoufox 后端下载 Camoufox 的出口代理
-	camoufoxProxy string
 }
 
 type modelCatalogService interface {
@@ -233,10 +228,9 @@ func (service *trackedService) aliases() []config.ModelAlias {
 	return nil
 }
 
-// serviceStoppedError 表示生成服务未运行，launching 表示正在启动，camoufox 是 Camoufox 后端正在准备 Camoufox 的进度或准备失败的原因
+// serviceStoppedError 表示生成服务未运行或正在启动。
 type serviceStoppedError struct {
 	launching bool
-	camoufox  error
 }
 
 var errServiceTransitioning = errors.New("生成服务正在切换状态")
@@ -254,13 +248,8 @@ const (
 )
 
 func (e *serviceStoppedError) Error() string {
-	switch {
-	case e.launching && e.camoufox != nil:
-		return "AIStudio2API 生成服务正在启动：" + e.camoufox.Error()
-	case e.launching:
+	if e.launching {
 		return "AIStudio2API 生成服务正在启动"
-	case e.camoufox != nil:
-		return "AIStudio2API 生成服务已停止：" + e.camoufox.Error()
 	}
 	return "AIStudio2API 生成服务已停止：在管理页面点击“启动服务”，或在服务配置中开启“自动启动生成服务”"
 }
@@ -276,53 +265,12 @@ func (e *serviceStoppedError) ErrorCode() string {
 	return "service_stopped"
 }
 
-// RetryAt 在 Camoufox 正在下载且能估计剩余时间时返回预计下载完成的时刻，其余情况返回 now
-func (e *serviceStoppedError) RetryAt(now time.Time) time.Time {
-	var preparing *camoufoxnative.PreparingError
-	if errors.As(e.camoufox, &preparing) {
-		return now.Add(preparing.Remaining)
-	}
-	return now
-}
+// RetryAt 返回立即重试时刻；服务器构建没有浏览器下载阶段。
+func (e *serviceStoppedError) RetryAt(now time.Time) time.Time { return now }
 
-// stoppedError 返回生成服务未运行的错误：Camoufox 后端启动期间带上 Camoufox 的准备进度，停止时带上 Camoufox 准备失败的原因
+// stoppedError 返回生成服务当前未运行的状态。
 func (service *trackedService) stoppedError() error {
-	err := &serviceStoppedError{launching: service.state.Load() == serviceLaunching}
-	if service.camoufoxWait == nil {
-		return err
-	}
-	_, camoufox := camoufoxnative.ReadyPath()
-	var preparing *camoufoxnative.PreparingError
-	if err.launching || camoufox != nil && !errors.As(camoufox, &preparing) {
-		err.camoufox = camoufox
-	}
-	return err
-}
-
-// prepareCamoufox 在 Camoufox 后端有启用的账户时等 Camoufox 就绪，需要下载时先关闭 camoufoxWait 放行等待启动的公开请求
-func (service *trackedService) prepareCamoufox(ctx context.Context) error {
-	if service.camoufoxWait == nil {
-		return nil
-	}
-	if len(service.pool.EnabledAccounts()) == 0 {
-		return nil
-	}
-	if camoufoxnative.PreparationState().Ready {
-		_, err := camoufoxnative.Prepare(ctx, service.camoufoxProxy)
-		return err
-	}
-	select {
-	case <-service.camoufoxWait:
-	default:
-		close(service.camoufoxWait)
-	}
-	startedAt := time.Now()
-	service.requests.logStage("service", "INFO", api.LogStage{Name: "生成服务启动"}, "等待 Camoufox 下载")
-	if _, err := camoufoxnative.Prepare(ctx, service.camoufoxProxy); err != nil {
-		return err
-	}
-	service.requests.logStage("service", "INFO", api.LogStage{Name: "生成服务启动"}, "Camoufox 已就绪", "duration", time.Since(startedAt))
-	return nil
+	return &serviceStoppedError{launching: service.state.Load() == serviceLaunching}
 }
 
 // Running 返回公开生成服务是否接受请求
@@ -366,10 +314,6 @@ func (service *trackedService) Start(ctx context.Context, launching func()) ([]a
 	service.replaceModelSnapshot(service.catalog.CachedModels())
 	launching()
 	service.probeProxyPool(dataContext)
-	if err := service.prepareCamoufox(dataContext); err != nil {
-		stopCaller()
-		return nil, false, service.finishLaunch(transitionDone, dataCancel, nil, err)
-	}
 	models := service.modelSnapshot()
 	service.requests.logStage("service", "INFO", api.LogStage{Name: "生成服务启动", Step: 1, Steps: 2}, "准备模型目录", "cached_models", len(models))
 	cached := len(models) > 0

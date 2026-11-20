@@ -434,7 +434,7 @@ export interface ServiceConfig {
   model_channels: string
   model_accounts: string
   api_key_accounts: string
-  waa_backend: 'camoufox' | 'spidermonkey'
+  waa_backend: 'spidermonkey'
   media_output: 'inline' | 'url'
   media_base_url: string
   environment: string[]

@@ -59,7 +59,6 @@ const sections: {
       'auto_start',
       'hide_dock_icon',
       'listen_addr',
-      'preview_listen_addr',
       'proxy_api_key',
       'api_key_accounts',
       'auth_states',
@@ -86,7 +85,6 @@ const sections: {
     label: 'settings.section.runtime',
     icon: 'channel',
     fields: [
-      'waa_backend',
       'upstream_channels',
       'build_native_nonstream',
       'init_timeout',
@@ -140,10 +138,6 @@ const section = useQueryParam<SectionID>(
 const current = computed(() => sections.find((item) => item.id === section.value)!)
 
 const upstreamChannelOptions: UpstreamChannel[] = ['playground', 'build']
-const waaBackendOptions: { value: ServiceConfig['waa_backend']; label: TranslationKey }[] = [
-  { value: 'camoufox', label: 'settings.waaBackendCamoufox' },
-  { value: 'spidermonkey', label: 'settings.waaBackendSpiderMonkey' },
-]
 const inputClass =
   'w-full rounded-md border border-line bg-canvas px-3 py-2 text-sm text-white transition focus:border-blue-500 focus:outline-none'
 
@@ -170,23 +164,8 @@ const capacityLocked = computed(() => {
   return keys.length > 0 ? keys.join(', ') : undefined
 })
 
-// previewFallback 表示保存的预览地址已在本次启动生效，但端口不可用、预览服务改用了空闲端口
-const previewFallback = computed(
-  () =>
-    props.config !== null &&
-    !props.config.management_restart_required &&
-    form.preview_listen_addr === props.config.preview_listen_addr &&
-    props.config.preview_listen_addr !== props.config.active_preview_listen_addr,
-)
-
-// capacityLimit 是 Worker 滑块的上限：所选 WAA 后端默认峰值的两倍（SpiderMonkey 20、Camoufox 10），账户数或输入的峰值更大时取其值
-const capacityLimit = computed(() =>
-  Math.max(
-    form.waa_backend === 'camoufox' ? 20 : 40,
-    props.accounts.length,
-    form.max_active_workers,
-  ),
-)
+// capacityLimit 是 SpiderMonkey 容器 Worker 滑块的上限，账户数或输入的峰值更大时取其值
+const capacityLimit = computed(() => Math.max(4, props.accounts.length, form.max_active_workers))
 
 // setWorkerRange 把滑块的两端写回常驻数与峰值上限
 function setWorkerRange(range: number[] | undefined): void {
@@ -533,38 +512,6 @@ async function saveConfig(): Promise<void> {
               </p>
             </SettingRow>
             <SettingRow
-              :label="t('settings.previewListen')"
-              control-id="setting-preview-listen"
-              :description="t('settings.previewListenHelp')"
-              effect="management"
-              :changed="changedFields.has('preview_listen_addr')"
-              :env="environmentKey('preview_listen_addr')"
-            >
-              <input
-                id="setting-preview-listen"
-                v-model.trim="form.preview_listen_addr"
-                :class="inputClass"
-                autocomplete="off"
-                spellcheck="false"
-              />
-              <p
-                v-if="previewFallback"
-                class="mt-1 flex items-start gap-1.5 text-xs [overflow-wrap:anywhere] text-yellow-300"
-              >
-                <UiIcon name="warning" :size="14" class="mt-px shrink-0" />{{
-                  t('settings.previewFallback')
-                    .replace('{configured}', config.preview_listen_addr)
-                    .replace('{active}', config.active_preview_listen_addr)
-                }}
-              </p>
-              <p
-                v-else-if="form.preview_listen_addr !== config.active_preview_listen_addr"
-                class="mt-1 text-xs break-all text-gray-500"
-              >
-                {{ t('settings.activeValue') }}: {{ config.active_preview_listen_addr }}
-              </p>
-            </SettingRow>
-            <SettingRow
               :label="t('settings.apiKey')"
               control-id="setting-api-key"
               :description="t('settings.apiKeyHelp')"
@@ -781,24 +728,6 @@ async function saveConfig(): Promise<void> {
           </template>
 
           <template v-else-if="section === 'runtime'">
-            <SettingRow
-              :label="t('settings.waaBackend')"
-              control-id="setting-waa-backend"
-              :description="t('settings.waaBackendHelp')"
-              effect="service"
-              :changed="changedFields.has('waa_backend')"
-              :env="environmentKey('waa_backend')"
-            >
-              <UiSelect id="setting-waa-backend" v-model="form.waa_backend" :class="inputClass">
-                <option
-                  v-for="option in waaBackendOptions"
-                  :key="option.value"
-                  :value="option.value"
-                >
-                  {{ t(option.label) }}
-                </option>
-              </UiSelect>
-            </SettingRow>
             <SettingRow
               v-for="channel in upstreamChannelOptions"
               :key="channel"

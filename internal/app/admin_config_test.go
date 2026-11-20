@@ -20,6 +20,7 @@ func TestAdminConfig(t *testing.T) {
 	cfg.AdminAuthEnabled = true
 	cfg.AdminUsername = "operator"
 	cfg.AdminPassword = "test-password"
+	cfg.ProxyAPIKey = "test-api-key"
 	if err := cfg.Save(path); err != nil {
 		t.Fatal(err)
 	}

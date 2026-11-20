@@ -6,17 +6,23 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
-	"github.com/Mag1cFall/AIStudio2API/internal/chromeauth"
 )
 
 type chromeCookieRefreshFunc func(context.Context, aistudio.AuthSource, aistudio.ChromeOAuthMaterial, string) ([]aistudio.StateCookie, *aistudio.BoundSession, error)
+
+func disabledChromeCookieRefresh(context.Context, aistudio.AuthSource, aistudio.ChromeOAuthMaterial, string) ([]aistudio.StateCookie, *aistudio.BoundSession, error) {
+	return nil, nil, camoufoxnative.ErrAuthenticationRequired
+}
+
+func disabledBoundCookieRefresh(context.Context, aistudio.StorageState, aistudio.AuthExtension, string) ([]string, error) {
+	return nil, camoufoxnative.ErrAuthenticationRequired
+}
 
 // boundRefreshThreshold 是 Chromium 主动刷新 DBSC 会话时绑定 Cookie 的剩余时间
 const boundRefreshThreshold = 2 * time.Minute
@@ -25,7 +31,6 @@ const boundRefreshThreshold = 2 * time.Minute
 type authRuntimeRefresher struct {
 	pool          *aistudio.AccountPool
 	refresh       chromeCookieRefreshFunc
-	importCurrent func(context.Context, aistudio.AuthSource, aistudio.ChromeOAuthMaterial, string) (aistudio.StorageState, error)
 	reset         func(string) error
 	prepareWorker func(*aistudio.Account, aistudio.AccountConfig) (*accountWorkerUpdate, error)
 	// rotate 刷新账户的 DBSC 会话并返回响应 Cookie
@@ -158,45 +163,12 @@ func newAuthRuntimeRefresher(
 ) *authRuntimeRefresher {
 	return &authRuntimeRefresher{
 		pool:    workers.pool,
-		refresh: chromeauth.Refresh, importCurrent: importCurrentChromeState,
+		refresh: disabledChromeCookieRefresh,
 		reset: workers.Reset, prepareWorker: workers.prepareUpdate,
-		rotate: chromeauth.RotateBoundCookies, mergeWorker: workers.MergeCookies,
+		rotate: disabledBoundCookieRefresh, mergeWorker: workers.MergeCookies,
 		globalProxy: globalProxy,
 		requests:    requests,
 	}
-}
-
-// importCurrentChromeState 从原来源中更新同一 Google 账户的认证材料
-func importCurrentChromeState(ctx context.Context, source aistudio.AuthSource, material aistudio.ChromeOAuthMaterial, proxy string) (aistudio.StorageState, error) {
-	root, err := chromeauth.DefaultChromeRoot()
-	if err != nil {
-		return aistudio.StorageState{}, err
-	}
-	accounts, err := chromeauth.Discover(root)
-	if err != nil {
-		return aistudio.StorageState{}, err
-	}
-	var selected string
-	for _, account := range accounts {
-		if !account.Importable || !strings.EqualFold(account.Email, source.Email) || account.GaiaID != material.GaiaID {
-			continue
-		}
-		selected = account.ID
-		if account.Profile == source.Profile {
-			break
-		}
-	}
-	if selected == "" {
-		return aistudio.StorageState{}, fmt.Errorf("Chrome 中没有可更新的原账户 %s", source.Email)
-	}
-	results, err := chromeauth.Import(ctx, chromeauth.ImportOptions{ChromeRoot: root, Proxy: proxy, AccountIDs: []string{selected}})
-	if err != nil {
-		return aistudio.StorageState{}, err
-	}
-	if len(results) != 1 || !strings.EqualFold(results[0].Email, source.Email) {
-		return aistudio.StorageState{}, fmt.Errorf("Chrome 更新账户与原账户不匹配")
-	}
-	return results[0].State, nil
 }
 
 // markAuthenticationRequired 发布当前认证版本号的账户状态
@@ -408,23 +380,6 @@ func (refresher *authRuntimeRefresher) Refresh(ctx context.Context, generation u
 		proxy := account.EffectiveProxy(refresher.globalProxy)
 		var cookies []aistudio.StateCookie
 		cookies, extension.Bound, err = refresher.refresh(ctx, extension.Source, *extension.OAuth, proxy)
-		if errors.Is(err, chromeauth.ErrCredentialsRejected) {
-			if extension.Source.Browser != "chrome" || !strings.EqualFold(extension.Source.Email, account.ID) {
-				return errors.Join(fmt.Errorf("账户 %s 缺少可更新的 Chrome 来源", account.ID), err)
-			}
-			logRenewal("INFO", api.LogStage{}, "更新 Chrome 来源材料")
-			updated, importErr := refresher.importCurrent(ctx, extension.Source, *extension.OAuth, proxy)
-			if importErr != nil {
-				return errors.Join(err, importErr)
-			}
-			current, exists, importErr := updated.AuthExtension()
-			if importErr != nil || !exists || current.OAuth == nil || !strings.EqualFold(current.Source.Email, account.ID) ||
-				current.OAuth.GaiaID != extension.OAuth.GaiaID {
-				return fmt.Errorf("Chrome 更新结果与账户 %s 不匹配", account.ID)
-			}
-			extension = current
-			cookies, err = updated.Cookies, nil
-		}
 		if err != nil {
 			return fmt.Errorf("续签账户 %s: %w", account.ID, err)
 		}
@@ -484,9 +439,6 @@ func (refresher *authRuntimeRefresher) ensureBound(ctx context.Context) error {
 		return err
 	}
 	headers, err := refresher.rotate(ctx, state, extension, account.EffectiveProxy(refresher.globalProxy))
-	if errors.Is(err, chromeauth.ErrBoundSessionRejected) {
-		return errors.Join(camoufoxnative.ErrAuthenticationRequired, err)
-	}
 	if err != nil {
 		return fmt.Errorf("刷新账户 %s DBSC 会话: %w", account.ID, err)
 	}
