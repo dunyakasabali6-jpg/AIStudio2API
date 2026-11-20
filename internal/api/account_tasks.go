@@ -29,7 +29,7 @@ type AccountTaskItem struct {
 	Error string `json:"error,omitempty"`
 }
 
-// cookieImportItem 是 Cookie 导入中的一个账户：识别出的邮箱、Cookie 文本或浏览器调试地址与会话序号
+// cookieImportItem 是 Cookie 导入中的一个账户：识别出的邮箱、Cookie 文本与会话序号
 type cookieImportItem struct {
 	Email    string `json:"email"`
 	Cookies  string `json:"cookies"`
