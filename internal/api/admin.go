@@ -18,10 +18,7 @@ type AdminService interface {
 	Accounts(context.Context) ([]AdminAccount, error)
 	AccountExits(context.Context) ([]AccountExit, error)
 	CreateAccount(context.Context, AccountCreateInput, *camoufoxnative.LiveView) (AdminAccount, error)
-	ChromeImportProfiles(context.Context) ([]ChromeImportProfile, error)
-	CookieBrowsers(ctx context.Context, proxy string) ([]CookieBrowser, error)
 	DiscoverCookieAccounts(context.Context, CookieImportInput) ([]CookieBrowser, error)
-	ImportChromeAccounts(context.Context, ChromeImportInput) ([]AdminAccount, error)
 	ImportAccountState(context.Context, AccountStateInput) (AdminAccount, error)
 	RenewAccountCookies(ctx context.Context, accountID string, token string, cookies []aistudio.StateCookie) (AdminAccount, error)
 	UpdateAccount(context.Context, string, AccountInput) (AdminAccount, error)
@@ -30,7 +27,6 @@ type AdminService interface {
 	RefreshAccount(context.Context, string) (AdminAccountRefresh, error)
 	StartService(context.Context) (AdminStatus, error)
 	StopService(context.Context) (AdminStatus, error)
-	DownloadCamoufox(context.Context) (AdminStatus, error)
 	ClearLogs(context.Context) error
 	RuntimeConfig(context.Context) (RuntimeConfig, error)
 	UpdateRuntimeConfig(context.Context, RuntimeConfig) (RuntimeConfig, error)
@@ -380,9 +376,6 @@ func (s *server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/accounts", s.handleAccounts)
 	mux.HandleFunc("GET /api/accounts/exits", s.handleAccountExits)
 	mux.HandleFunc("POST /api/accounts", s.handleCreateAccount)
-	mux.HandleFunc("GET /api/accounts/import/chrome", s.handleChromeImportProfiles)
-	mux.HandleFunc("POST /api/accounts/import/chrome", s.handleImportChromeAccounts)
-	mux.HandleFunc("GET /api/accounts/import/browsers", s.handleCookieBrowsers)
 	mux.HandleFunc("POST /api/accounts/import/cookies/discover", s.handleDiscoverCookieAccounts)
 	mux.HandleFunc("POST /api/accounts/import/cookies", s.handleImportCookieAccounts)
 	mux.HandleFunc("GET /api/accounts/tasks", s.handleAccountTasks)
@@ -397,7 +390,6 @@ func (s *server) registerAdmin(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/accounts/{id}/refresh", s.handleRefreshAccount)
 	mux.HandleFunc("POST /api/control/start", s.handleStartService)
 	mux.HandleFunc("POST /api/control/stop", s.handleStopService)
-	mux.HandleFunc("POST /api/camoufox/download", s.handleDownloadCamoufox)
 	mux.HandleFunc("DELETE /api/logs", s.handleClearLogs)
 	mux.HandleFunc("GET /api/config", s.handleRuntimeConfig)
 	mux.HandleFunc("PUT /api/config", s.handleUpdateRuntimeConfig)
@@ -450,24 +442,6 @@ func (s *server) handleAccountExits(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string][]AccountExit{"exits": exits})
 }
 
-func (s *server) handleChromeImportProfiles(w http.ResponseWriter, r *http.Request) {
-	profiles, err := s.config.Admin.ChromeImportProfiles(r.Context())
-	if err != nil {
-		writeAdminUpstreamError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string][]ChromeImportProfile{"profiles": profiles})
-}
-
-func (s *server) handleCookieBrowsers(w http.ResponseWriter, r *http.Request) {
-	browsers, err := s.config.Admin.CookieBrowsers(r.Context(), r.URL.Query().Get("proxy"))
-	if err != nil {
-		writeAdminUpstreamError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string][]CookieBrowser{"browsers": browsers})
-}
-
 func (s *server) handleDiscoverCookieAccounts(w http.ResponseWriter, r *http.Request) {
 	var input CookieImportInput
 	if err := decodeJSON(r, &input); err != nil {
@@ -515,16 +489,6 @@ func (s *server) handleRefreshAccount(w http.ResponseWriter, r *http.Request) {
 
 func (s *server) handleStartService(w http.ResponseWriter, r *http.Request) {
 	status, err := s.config.Admin.StartService(r.Context())
-	if err != nil {
-		writeAdminUpstreamError(w, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, status)
-}
-
-// handleDownloadCamoufox 在后台重新开始下载 Camoufox 并返回服务状态
-func (s *server) handleDownloadCamoufox(w http.ResponseWriter, r *http.Request) {
-	status, err := s.config.Admin.DownloadCamoufox(r.Context())
 	if err != nil {
 		writeAdminUpstreamError(w, err)
 		return

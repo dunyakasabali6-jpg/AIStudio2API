@@ -2,8 +2,9 @@ name: Checks
 
 on:
   pull_request:
+  workflow_dispatch:
   push:
-    branches: [main]
+    branches: [main, northflank-lite]
   workflow_call:
 
 permissions:
@@ -85,29 +86,10 @@ jobs:
           target: linux-amd64-gnu
       - name: Run Unit Tests
         if: matrix.check == 'test'
-        run: go test -mod=readonly -trimpath -vet=off ./cmd/... ./internal/...
+        run: go test -mod=readonly -trimpath -tags northflank -vet=off ./cmd/... ./internal/...
       - name: Check Minimum Go Version
         if: matrix.check == 'vet'
         run: |
           go version
-          go vet -mod=readonly -trimpath ./...
-          go build -mod=readonly -trimpath ./cmd/aistudio2api
-      - name: Install Windows C Compiler
-        if: matrix.check == 'vet'
-        run: |
-          curl -fsSL https://github.com/mstorsjo/llvm-mingw/releases/download/20261020/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64.tar.xz | tar -xJ -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/llvm-mingw-20261020-ucrt-ubuntu-22.04-x86_64/bin" >> "$GITHUB_PATH"
-      - uses: ./.github/actions/static-libraries
-        if: matrix.check == 'vet'
-        with:
-          target: windows-amd64
-      - name: Vet Windows Build
-        if: matrix.check == 'vet'
-        run: CC=x86_64-w64-mingw32-clang CXX=x86_64-w64-mingw32-clang++ GOOS=windows go vet -mod=readonly -trimpath -tags desktop,production ./...
-      - uses: actions/cache/save@v5
-        if: github.ref == 'refs/heads/main'
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-checks-${{ matrix.check }}-${{ steps.go.outputs.go-version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          go vet -mod=readonly -trimpath -tags northflank ./...
+          go build -mod=readonly -trimpath -tags northflank ./cmd/aistudio2api

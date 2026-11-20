@@ -214,23 +214,13 @@ async function startService(): Promise<void> {
   }
 }
 
-// retryCamoufox 在后台重新下载 Camoufox，从已下载的部分继续
-async function retryCamoufox(): Promise<void> {
-  try {
-    status.value = await api.downloadCamoufox()
-  } catch (error) {
-    showNotice(errorText(error), 'error')
-  }
-}
-
 // exitLookups 是进行中的出口查询数，查询可能开始新一轮出口 IP 库下载
 const exitLookups = ref(0)
 
-// statusTimer 在 Camoufox 或出口 IP 库下载期间、出口查询或账户任务进行中每秒刷新服务状态，服务端不在下载期间推送进度
+// statusTimer 在出口 IP 库下载、出口查询或账户任务进行中每秒刷新服务状态
 let statusTimer: number | undefined
 watch(
   () =>
-    status.value?.camoufox.preparing === true ||
     status.value?.geoip.preparing === true ||
     exitLookups.value > 0 ||
     accountTasks.value.some((task) => task.state === 'running'),
@@ -409,7 +399,6 @@ export function useConsole() {
     commitDelete,
     startService,
     stopService,
-    retryCamoufox,
     clearLogs,
     waitForRestart,
     startConsole,

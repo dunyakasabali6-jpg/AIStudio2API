@@ -2,7 +2,6 @@ package app
 
 import (
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,7 +19,7 @@ import (
 	"github.com/Mag1cFall/AIStudio2API/internal/aistudio"
 	"github.com/Mag1cFall/AIStudio2API/internal/api"
 	"github.com/Mag1cFall/AIStudio2API/internal/camoufoxnative"
-	"github.com/Mag1cFall/AIStudio2API/internal/chromeauth"
+	"github.com/Mag1cFall/AIStudio2API/internal/cookieauth"
 	"github.com/Mag1cFall/AIStudio2API/internal/config"
 	"github.com/Mag1cFall/AIStudio2API/internal/egress"
 )
@@ -121,7 +120,7 @@ func (admin *runtimeAdmin) Status(context.Context) (api.AdminStatus, error) {
 		Accounts:       counts,
 		Camoufox:       camoufoxnative.PreparationState(),
 		GeoIP:          egress.PreparationState(),
-		ChromeImport:   chromeauth.Supported,
+		ChromeImport:   false,
 	}
 	return status, nil
 }
@@ -221,7 +220,7 @@ func (admin *runtimeAdmin) CreateAccount(ctx context.Context, input api.AccountC
 		return api.AdminAccount{}, invalidAccount(err)
 	}
 	target, done := admin.accountCommit()
-	account, err := target.upsertAccount(ctx, accountConfig.Label, accountConfig, result.StorageState, directory)
+	account, err := target.upsertAccount(ctx, accountConfig.Label, accountConfig, result.StorageState)
 	done()
 	if err != nil {
 		return api.AdminAccount{}, err
@@ -234,111 +233,14 @@ func (admin *runtimeAdmin) CreateAccount(ctx context.Context, input api.AccountC
 	return created, nil
 }
 
-func (admin *runtimeAdmin) ChromeImportProfiles(context.Context) ([]api.ChromeImportProfile, error) {
-	root, err := chromeauth.DefaultChromeRoot()
-	if err != nil {
-		return nil, err
-	}
-	accounts, err := chromeauth.Discover(root)
-	if err != nil {
-		return nil, err
-	}
-	recorded, err := admin.store.RestrictedImports()
-	if err != nil {
-		return nil, err
-	}
-	return chromeImportProfiles(accounts, admin.accountIDs(), recorded), nil
-}
-
-// chromeImportProfiles 返回可导入的 Chrome 账户，已导入且未受限的账户不列出，服务受限的已导入账户与导入时被拒绝的账户带受限原因
-func chromeImportProfiles(accounts []chromeauth.Account, existing map[string]string, recorded map[string]string) []api.ChromeImportProfile {
-	seen := make(map[string]struct{}, len(accounts))
-	profiles := make([]api.ChromeImportProfile, 0, len(accounts))
-	for _, account := range accounts {
-		email := strings.ToLower(strings.TrimSpace(account.Email))
-		if !account.Importable || email == "" {
-			continue
-		}
-		restricted, exists := existing[email]
-		if _, duplicate := seen[email]; duplicate || exists && restricted == "" {
-			continue
-		}
-		seen[email] = struct{}{}
-		profiles = append(profiles, api.ChromeImportProfile{
-			ID: account.ID, Profile: account.Profile, DisplayName: account.DisplayName, Email: email,
-			Restricted: cmp.Or(restricted, recorded[email]),
-		})
-	}
-	return profiles
-}
-
-// restrictedChromeSelection 在 Chrome 认证交换之前拒绝所选账户中服务受限的已导入账户与导入时被记下服务受限的账户
-func restrictedChromeSelection(accounts []chromeauth.Account, ids []string, existing map[string]string, recorded map[string]string) error {
-	for _, account := range accounts {
-		if !slices.ContainsFunc(ids, func(id string) bool { return strings.EqualFold(strings.TrimSpace(id), account.ID) }) {
-			continue
-		}
-		email := strings.ToLower(strings.TrimSpace(account.Email))
-		if reason := cmp.Or(existing[email], recorded[email]); reason != "" {
-			return accountRestricted(email, reason)
-		}
-	}
-	return nil
-}
-
-// CookieBrowsers 列出本机开启远程调试的浏览器，读取其 Cookie 并经 proxy 识别其中各会话登录 AI Studio 的账户，每个账户一项，proxy 为空时用默认出口
-func (admin *runtimeAdmin) CookieBrowsers(ctx context.Context, proxy string) ([]api.CookieBrowser, error) {
-	addresses, err := chromeauth.DebugAddresses(ctx)
-	if err != nil {
-		return nil, err
-	}
-	existing := admin.accountIDs()
-	browsers := make([][]api.CookieBrowser, len(addresses))
-	var group sync.WaitGroup
-	for index, address := range addresses {
-		group.Go(func() {
-			browser := api.CookieBrowser{Address: address}
-			name, err := chromeauth.DebugBrowserName(ctx, address)
-			if err != nil {
-				browser.Error = err.Error()
-				browsers[index] = []api.CookieBrowser{browser}
-				return
-			}
-			browser.Browser = name
-			accounts, err := admin.readCookieBrowser(ctx, &browser, proxy)
-			browser.SignedOut = errors.Is(err, chromeauth.ErrSignedOut) || errors.Is(err, aistudio.ErrLoginCookieMissing)
-			if err != nil && !browser.SignedOut {
-				browser.Error = err.Error()
-			}
-			browsers[index] = cookieAccountEntries(browser, accounts, existing)
-		})
-	}
-	group.Wait()
-	return append([]api.CookieBrowser{}, slices.Concat(browsers...)...), nil
-}
-
-// readCookieBrowser 读取调试浏览器的 Cookie，经 proxy 识别其中各会话登录 AI Studio 的账户
-func (admin *runtimeAdmin) readCookieBrowser(ctx context.Context, browser *api.CookieBrowser, proxy string) ([]chromeauth.CookieAccount, error) {
-	source, err := chromeauth.ReadCDPBrowser(ctx, browser.Address)
-	if err != nil {
-		return nil, err
-	}
-	state, err := aistudio.ParseCookieText(source.Cookies)
-	if err != nil {
-		return nil, err
-	}
-	browser.DeviceBound = deviceBoundSession(state)
-	return chromeauth.DiscoverCookieAccounts(ctx, &state, admin.effectiveProxy(proxy))
-}
-
 // DiscoverCookieAccounts 解析粘贴的 Cookie，返回其中各会话登录 AI Studio 的账户
 func (admin *runtimeAdmin) DiscoverCookieAccounts(ctx context.Context, input api.CookieImportInput) ([]api.CookieBrowser, error) {
 	state, err := aistudio.ParseCookieText(input.Cookies)
 	if err != nil {
 		return nil, &adminOperationError{status: http.StatusBadRequest, code: "invalid_cookies", message: err.Error()}
 	}
-	accounts, err := chromeauth.DiscoverCookieAccounts(ctx, &state, admin.effectiveProxy(input.Proxy))
-	if errors.Is(err, chromeauth.ErrSignedOut) {
+	accounts, err := cookieauth.DiscoverCookieAccounts(ctx, &state, admin.effectiveProxy(input.Proxy))
+	if errors.Is(err, cookieauth.ErrSignedOut) {
 		return nil, &adminOperationError{status: http.StatusBadRequest, code: "signed_out", message: err.Error()}
 	}
 	if err != nil {
@@ -353,7 +255,7 @@ func deviceBoundSession(state aistudio.StorageState) bool {
 }
 
 // cookieAccountEntries 以 template 为模板为每个会话账户生成一项并标记已导入与服务受限的账户，没有账户时只返回 template
-func cookieAccountEntries(template api.CookieBrowser, accounts []chromeauth.CookieAccount, existing map[string]string) []api.CookieBrowser {
+func cookieAccountEntries(template api.CookieBrowser, accounts []cookieauth.CookieAccount, existing map[string]string) []api.CookieBrowser {
 	if len(accounts) == 0 {
 		return []api.CookieBrowser{template}
 	}
@@ -393,7 +295,7 @@ func (admin *runtimeAdmin) checkAccountAccess(ctx context.Context, email string,
 	if restricted := admin.accountIDs()[strings.ToLower(email)]; restricted != "" {
 		return "", accountRestricted(email, restricted)
 	}
-	signedIn, err := chromeauth.CheckAccess(ctx, state, proxy, authUser)
+	signedIn, err := cookieauth.CheckAccess(ctx, state, proxy, authUser)
 	if denial := aistudio.RestrictionDenial(err); denial != nil {
 		if !errors.Is(denial, camoufoxnative.ErrServiceRestricted) {
 			return "", accountRestricted(email, denial.Error())
@@ -408,85 +310,6 @@ func accountRestricted(email string, reason string) error {
 	return &adminOperationError{status: http.StatusForbidden, code: "account_restricted", message: fmt.Sprintf("%s 服务受限，未导入：%s", email, reason)}
 }
 
-func (admin *runtimeAdmin) ImportChromeAccounts(ctx context.Context, input api.ChromeImportInput) ([]api.AdminAccount, error) {
-	if len(input.AccountIDs) == 0 {
-		return nil, invalidAccount(fmt.Errorf("未选择 Chrome 账号"))
-	}
-	root, err := chromeauth.DefaultChromeRoot()
-	if err != nil {
-		return nil, err
-	}
-	accountProxy := strings.TrimSpace(input.Proxy)
-	timezone, err := accountTimezone(input.Timezone)
-	if err != nil {
-		return nil, invalidAccount(err)
-	}
-	discovered, err := chromeauth.Discover(root)
-	if err != nil {
-		return nil, err
-	}
-	recorded, err := admin.store.RestrictedImports()
-	if err != nil {
-		return nil, err
-	}
-	if err := restrictedChromeSelection(discovered, input.AccountIDs, admin.accountIDs(), recorded); err != nil {
-		return nil, err
-	}
-	results, err := chromeauth.Import(ctx, chromeauth.ImportOptions{
-		ChromeRoot: root, Proxy: admin.effectiveProxy(accountProxy), AccountIDs: input.AccountIDs,
-	})
-	if err != nil {
-		return nil, err
-	}
-	environment, err := admin.accountEnvironment(ctx, admin.effectiveProxy(accountProxy), input.Locale, timezone)
-	if err != nil {
-		return nil, err
-	}
-	configs := make([]aistudio.AccountConfig, len(results))
-	seen := make(map[string]struct{}, len(results))
-	for index, result := range results {
-		email := strings.ToLower(strings.TrimSpace(result.Email))
-		if _, exists := seen[email]; exists {
-			return nil, invalidAccount(fmt.Errorf("Chrome 账号重复: %s", email))
-		}
-		seen[email] = struct{}{}
-		accountConfig := aistudio.DefaultAccountConfig(email)
-		accountConfig.Proxy = accountProxy
-		accountConfig.Locale, accountConfig.Timezone = environment.Locale, environment.Timezone
-		if err := accountConfig.Validate(); err != nil {
-			return nil, invalidAccount(err)
-		}
-		if _, err := aistudio.NewSigner().Authorization(result.State); err != nil {
-			return nil, fmt.Errorf("认证状态无法用于 AI Studio: %w", err)
-		}
-		if _, err := admin.checkAccountAccess(ctx, email, &results[index].State, admin.effectiveProxy(accountProxy), 0); err != nil {
-			return nil, err
-		}
-		configs[index] = accountConfig
-	}
-	target, done := admin.accountCommit()
-	imported := make([]*aistudio.Account, 0, len(results))
-	for index, result := range results {
-		account, err := target.upsertAccount(ctx, configs[index].Label, configs[index], result.State, "")
-		if err != nil {
-			done()
-			return nil, err
-		}
-		imported = append(imported, account)
-		admin.requests.log("auth", "INFO", "Chrome 账户已导入", "account", account.Config.Label)
-	}
-	done()
-	accounts := make([]api.AdminAccount, 0, len(imported))
-	for _, account := range imported {
-		synced, err := target.syncedAccount(ctx, account)
-		if err != nil {
-			return nil, err
-		}
-		accounts = append(accounts, synced)
-	}
-	return accounts, nil
-}
-
 // ImportAccountState 导入远程配对上传或 Cookie 导入的认证状态与 Camoufox 指纹，未给标签时以 Cookie 中第 auth_user 个会话登录的账户邮箱为标签
 func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.AccountStateInput) (api.AdminAccount, error) {
 	timezone, err := accountTimezone(input.Timezone)
@@ -495,8 +318,8 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 	}
 	label := strings.TrimSpace(input.Label)
 	if label == "" {
-		verification, err := chromeauth.VerifyAuthUser(ctx, &input.StorageState, admin.effectiveProxy(input.Proxy), input.AuthUser)
-		if errors.Is(err, chromeauth.ErrSignedOut) {
+		verification, err := cookieauth.VerifyAuthUser(ctx, &input.StorageState, admin.effectiveProxy(input.Proxy), input.AuthUser)
+		if errors.Is(err, cookieauth.ErrSignedOut) {
 			return api.AdminAccount{}, &adminOperationError{status: http.StatusBadRequest, code: "signed_out", message: err.Error()}
 		}
 		if denial := aistudio.RestrictionDenial(err); denial != nil {
@@ -537,18 +360,6 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 	if !strings.EqualFold(signedIn, email) {
 		return api.AdminAccount{}, invalidAccount(fmt.Errorf("登录邮箱与账户不一致: %s", signedIn))
 	}
-	fingerprintDirectory := ""
-	if len(input.Fingerprint) != 0 {
-		directory, err := os.MkdirTemp("", "aistudio2api-pairing-*")
-		if err != nil {
-			return api.AdminAccount{}, fmt.Errorf("创建配对指纹目录: %w", err)
-		}
-		defer os.RemoveAll(directory)
-		if err := os.WriteFile(filepath.Join(directory, "camoufox-fingerprint.json"), input.Fingerprint, 0o600); err != nil {
-			return api.AdminAccount{}, fmt.Errorf("写入配对指纹: %w", err)
-		}
-		fingerprintDirectory = directory
-	}
 	target, done := admin.accountCommit()
 	if existing := target.accountID(email); existing != "" && input.RenewalToken != "" {
 		done()
@@ -556,7 +367,7 @@ func (admin *runtimeAdmin) ImportAccountState(ctx context.Context, input api.Acc
 			status: http.StatusConflict, code: "account_exists", message: "账户已存在: " + existing,
 		}
 	}
-	account, err := target.upsertAccount(ctx, email, accountConfig, input.StorageState, fingerprintDirectory)
+	account, err := target.upsertAccount(ctx, email, accountConfig, input.StorageState)
 	if err == nil && input.RenewalToken != "" {
 		err = target.savePairingRenewal(account.ID, input.RenewalToken)
 	}
@@ -580,12 +391,11 @@ func (admin *runtimeAdmin) upsertAccount(
 	id string,
 	accountConfig aistudio.AccountConfig,
 	state aistudio.StorageState,
-	fingerprintDirectory string,
 ) (*aistudio.Account, error) {
 	if existing := admin.accountID(id); existing != "" {
-		return admin.updateImportedAccount(ctx, existing, accountConfig.AuthUser, state, fingerprintDirectory)
+		return admin.updateImportedAccount(ctx, existing, accountConfig.AuthUser, state)
 	}
-	return admin.addAccount(accountConfig, state, fingerprintDirectory)
+	return admin.addAccount(accountConfig, state)
 }
 
 // accountID 返回与 id 不区分大小写相同的已有账户 ID，没有时为空
@@ -604,7 +414,6 @@ func (admin *runtimeAdmin) updateImportedAccount(
 	accountID string,
 	authUser int,
 	state aistudio.StorageState,
-	fingerprintDirectory string,
 ) (*aistudio.Account, error) {
 	admin.cancelTransition(accountID)
 	lease, err := admin.pool.AcquireAccount(ctx, accountID)
@@ -615,7 +424,7 @@ func (admin *runtimeAdmin) updateImportedAccount(
 	if err := admin.workers.Reset(account.ID); err != nil {
 		return nil, errors.Join(err, lease.Release())
 	}
-	if err := replaceAccountState(lease, state, fingerprintDirectory); err != nil {
+	if err := replaceAccountState(lease, state); err != nil {
 		return nil, errors.Join(err, lease.Release())
 	}
 	if err := setCookieAuthUser(lease, authUser, admin.workers.prepareUpdate); err != nil {
@@ -635,7 +444,6 @@ func (admin *runtimeAdmin) updateImportedAccount(
 func (admin *runtimeAdmin) addAccount(
 	accountConfig aistudio.AccountConfig,
 	state aistudio.StorageState,
-	fingerprintDirectory string,
 ) (created *aistudio.Account, resultErr error) {
 	account, publishLease, err := admin.store.Create(accountConfig, state)
 	if errors.Is(err, aistudio.ErrAccountExists) {
@@ -649,11 +457,6 @@ func (admin *runtimeAdmin) addAccount(
 			resultErr = errors.Join(resultErr, publishLease.Release())
 		}
 	}()
-	if fingerprintDirectory != "" {
-		if err := camoufoxnative.PersistAccountFingerprint(fingerprintDirectory, account.Directory); err != nil {
-			return nil, errors.Join(err, admin.store.Delete(account))
-		}
-	}
 	if strings.TrimSpace(account.Config.Proxy) == "" {
 		account.SetPoolProxy(admin.proxies.Next())
 	}
@@ -877,9 +680,6 @@ func (admin *runtimeAdmin) LoginAccount(ctx context.Context, accountID string, v
 		return api.AdminAccount{}, fmt.Errorf("创建隔离登录目录: %w", err)
 	}
 	defer os.RemoveAll(directory)
-	if err := camoufoxnative.PersistAccountFingerprint(account.Directory, directory); err != nil {
-		return api.AdminAccount{}, err
-	}
 	startedAt := time.Now()
 	admin.requests.logStage(account.Config.Label, "INFO", api.LogStage{Name: "账户登录", Step: 1, Steps: 2}, "等待隔离登录")
 	request := admin.loginRequest(account, directory)
@@ -903,7 +703,7 @@ func (admin *runtimeAdmin) LoginAccount(ctx context.Context, accountID string, v
 		return api.AdminAccount{}, fmt.Errorf("认证状态无法用于 AI Studio: %w", err)
 	}
 	target, done := admin.accountCommit()
-	account, err = target.saveLogin(ctx, accountID, result.StorageState, directory)
+	account, err = target.saveLogin(ctx, accountID, result.StorageState)
 	done()
 	if err != nil {
 		return api.AdminAccount{}, err
@@ -916,8 +716,8 @@ func (admin *runtimeAdmin) LoginAccount(ctx context.Context, accountID string, v
 	return saved, nil
 }
 
-// saveLogin 以浏览器登录得到的认证状态与指纹目录替换账户的登录状态，重建该账户的 Worker 并返回账户
-func (admin *runtimeAdmin) saveLogin(ctx context.Context, accountID string, state aistudio.StorageState, fingerprintDirectory string) (*aistudio.Account, error) {
+// saveLogin 以浏览器登录得到的认证状态替换账户 Cookie，重建该账户的 Worker 并返回账户
+func (admin *runtimeAdmin) saveLogin(ctx context.Context, accountID string, state aistudio.StorageState) (*aistudio.Account, error) {
 	lease, err := admin.pool.AcquireAccount(ctx, accountID)
 	if err != nil {
 		return nil, accountOperationError(err)
@@ -926,7 +726,7 @@ func (admin *runtimeAdmin) saveLogin(ctx context.Context, accountID string, stat
 	if err := admin.workers.Reset(account.ID); err != nil {
 		return nil, errors.Join(err, lease.Release())
 	}
-	if err := replaceAccountState(lease, state, fingerprintDirectory); err != nil {
+	if err := replaceAccountState(lease, state); err != nil {
 		return nil, errors.Join(err, lease.Release())
 	}
 	if err := setCookieAuthUser(lease, 0, admin.workers.prepareUpdate); err != nil {
@@ -947,14 +747,8 @@ func (admin *runtimeAdmin) saveLogin(ctx context.Context, accountID string, stat
 	return account, nil
 }
 
-// replaceAccountState 以新登录状态替换账户的认证状态，fingerprintDirectory 非空时一并替换 Camoufox 指纹
-func replaceAccountState(lease *aistudio.AccountLease, state aistudio.StorageState, fingerprintDirectory string) error {
-	account := lease.Account()
-	if fingerprintDirectory != "" {
-		if err := camoufoxnative.PersistAccountFingerprint(fingerprintDirectory, account.Directory); err != nil {
-			return err
-		}
-	}
+// replaceAccountState 以新的认证状态替换账户 Cookie。
+func replaceAccountState(lease *aistudio.AccountLease, state aistudio.StorageState) error {
 	return lease.SaveStorageState(state)
 }
 

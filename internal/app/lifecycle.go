@@ -33,10 +33,7 @@ type generationAdmin interface {
 	Accounts(context.Context) ([]api.AdminAccount, error)
 	AccountExits(context.Context) ([]api.AccountExit, error)
 	CreateAccount(context.Context, api.AccountCreateInput, *camoufoxnative.LiveView) (api.AdminAccount, error)
-	ChromeImportProfiles(context.Context) ([]api.ChromeImportProfile, error)
-	CookieBrowsers(ctx context.Context, proxy string) ([]api.CookieBrowser, error)
 	DiscoverCookieAccounts(context.Context, api.CookieImportInput) ([]api.CookieBrowser, error)
-	ImportChromeAccounts(context.Context, api.ChromeImportInput) ([]api.AdminAccount, error)
 	ImportAccountState(context.Context, api.AccountStateInput) (api.AdminAccount, error)
 	RenewAccountCookies(ctx context.Context, accountID string, token string, cookies []aistudio.StateCookie) (api.AdminAccount, error)
 	UpdateAccount(context.Context, string, api.AccountInput) (api.AdminAccount, error)
@@ -63,8 +60,6 @@ type runtimeGeneration struct {
 	config          config.Config
 	lifecycleCancel context.CancelFunc
 	closeRuntime    func() error
-	// camoufoxWait 在启动开始等待 Camoufox 下载时关闭，不需要 Camoufox 时为 nil
-	camoufoxWait <-chan struct{}
 	// calls 是经 runtimeManager 转交给该实例、尚未结束的调用
 	calls sync.WaitGroup
 }
@@ -116,13 +111,11 @@ type runtimeManager struct {
 	accountsMu sync.RWMutex
 	// initial 是进程启动时装配、尚未启动过的生成服务，自动启动时配置未变就直接启动它而不重新载入账户
 	initial *runtimeGeneration
-	// launchMu 保护 startCancel、launching、launchReleased 与 autoStartCancel
+	// launchMu 保护 startCancel、launching 与 autoStartCancel
 	launchMu    sync.Mutex
 	startCancel context.CancelFunc
 	// launching 在生成服务启动期间存在，启动结束时关闭
 	launching chan struct{}
-	// launchReleased 在本轮启动开始等待 Camoufox 下载时关闭，Camoufox 就绪前等待启动的公开请求不再等待
-	launchReleased  chan struct{}
 	autoStartCancel context.CancelFunc
 	// settings 是已保存的只决定新请求行为的设置
 	settings atomic.Pointer[requestSettings]
@@ -172,7 +165,7 @@ func buildRuntimeGeneration(
 	}
 	return &runtimeGeneration{
 		service: service, admin: admin, config: cfg,
-		lifecycleCancel: lifecycleCancel, closeRuntime: closeRuntime, camoufoxWait: service.camoufoxWait,
+		lifecycleCancel: lifecycleCancel, closeRuntime: closeRuntime,
 	}, nil
 }
 
@@ -194,9 +187,9 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 		return current.admin.StartService(ctx)
 	}
 	launchCtx, launchCancel := context.WithCancel(manager.lifecycle)
-	launching, released := make(chan struct{}), make(chan struct{})
+	launching := make(chan struct{})
 	manager.launchMu.Lock()
-	manager.startCancel, manager.launching, manager.launchReleased = launchCancel, launching, released
+	manager.startCancel, manager.launching = launchCancel, launching
 	manager.launchMu.Unlock()
 	initial := manager.initial
 	manager.initial = nil
@@ -261,16 +254,6 @@ func (manager *runtimeManager) startService(ctx context.Context) (api.AdminStatu
 	manager.mu.Unlock()
 	manager.configMu.Unlock()
 	release()
-	if next.camoufoxWait != nil {
-		go func() {
-			select {
-			case <-next.camoufoxWait:
-				close(released)
-			case <-launching:
-			}
-		}()
-	}
-
 	if next != current {
 		current.lifecycleCancel()
 	}
@@ -289,27 +272,17 @@ func (manager *runtimeManager) finishStart(cancel context.CancelFunc) {
 	manager.launchMu.Lock()
 	manager.startCancel = nil
 	close(manager.launching)
-	manager.launching, manager.launchReleased = nil, nil
+	manager.launching = nil
 	manager.launchMu.Unlock()
 	cancel()
 }
 
-// WaitLaunch 在生成服务启动期间等到启动结束或 ctx 结束，启动正在等待 Camoufox 下载时立即返回
+// WaitLaunch 在生成服务启动期间等到启动结束或请求上下文取消。
 func (manager *runtimeManager) WaitLaunch(ctx context.Context) {
 	manager.launchMu.Lock()
-	launching, released := manager.launching, manager.launchReleased
+	launching := manager.launching
 	manager.launchMu.Unlock()
 	if launching == nil {
-		return
-	}
-	select {
-	case <-launching:
-		return
-	case <-released:
-	case <-ctx.Done():
-		return
-	}
-	if !camoufoxnative.PreparationState().Ready {
 		return
 	}
 	select {
@@ -331,12 +304,6 @@ func (manager *runtimeManager) StopService(ctx context.Context) (api.AdminStatus
 		cancel()
 	}
 	return current.admin.StopService(ctx)
-}
-
-// DownloadCamoufox 在 Camoufox 未就绪且没有进行中的下载时经出口代理在后台开始下载
-func (manager *runtimeManager) DownloadCamoufox(ctx context.Context) (api.AdminStatus, error) {
-	camoufoxnative.PrepareInBackground(manager.egressProxy())
-	return manager.Status(ctx)
 }
 
 // autoStartContext 返回手动启动或停止生成服务时取消的自动启动上下文
@@ -614,30 +581,11 @@ func (manager *runtimeManager) CreateAccount(ctx context.Context, input api.Acco
 	return manager.currentAdmin().CreateAccount(ctx, input, view)
 }
 
-// ChromeImportProfiles 返回当前生成服务可导入的 Chrome 账号
-func (manager *runtimeManager) ChromeImportProfiles(ctx context.Context) ([]api.ChromeImportProfile, error) {
-	current, done := manager.generation()
-	defer done()
-	return current.admin.ChromeImportProfiles(ctx)
-}
-
-// CookieBrowsers 返回当前生成服务发现的本机调试浏览器，proxy 为识别账户的请求出口
-func (manager *runtimeManager) CookieBrowsers(ctx context.Context, proxy string) ([]api.CookieBrowser, error) {
-	current, done := manager.generation()
-	defer done()
-	return current.admin.CookieBrowsers(ctx, proxy)
-}
-
 // DiscoverCookieAccounts 返回粘贴 Cookie 中各会话序号登录的账户并标记已导入的账户
 func (manager *runtimeManager) DiscoverCookieAccounts(ctx context.Context, input api.CookieImportInput) ([]api.CookieBrowser, error) {
 	current, done := manager.generation()
 	defer done()
 	return current.admin.DiscoverCookieAccounts(ctx, input)
-}
-
-// ImportChromeAccounts 在当前生成服务批量导入 Chrome 账号
-func (manager *runtimeManager) ImportChromeAccounts(ctx context.Context, input api.ChromeImportInput) ([]api.AdminAccount, error) {
-	return manager.currentAdmin().ImportChromeAccounts(ctx, input)
 }
 
 // ImportAccountState 在当前生成服务导入远程配对或 Cookie 导入的账户
@@ -673,19 +621,9 @@ func (manager *runtimeManager) LoginAccount(ctx context.Context, id string, view
 }
 
 // prepareLoginCamoufox 在浏览器登录前等 Camoufox 就绪，需要下载时记录等待，失败时记录原因
-func (manager *runtimeManager) prepareLoginCamoufox(ctx context.Context, source string) error {
-	if !camoufoxnative.PreparationState().Ready {
-		manager.requests.log(source, "INFO", "浏览器登录等待 Camoufox 下载")
-		camoufoxnative.PrepareInBackground(manager.egressProxy())
-		if status, err := manager.Status(ctx); err == nil {
-			manager.requests.publish(api.AdminEvent{Type: "status", Data: status})
-		}
-	}
-	_, err := camoufoxnative.Prepare(ctx, manager.egressProxy())
-	if err != nil {
-		manager.requests.log(source, "ERROR", "浏览器登录失败", "error", err)
-	}
-	return err
+func (manager *runtimeManager) prepareLoginCamoufox(_ context.Context, source string) error {
+	manager.requests.log(source, "WARN", "浏览器登录已在服务端部署中禁用；请使用 Cookie 导入", "source", source)
+	return errBrowserLoginDisabled
 }
 
 // RefreshAccount 在当前生成服务立即刷新账户状态，刷新期间不阻止生成服务换代

@@ -812,6 +812,7 @@ const addMethods = computed<
     label: 'accounts.browserLogin',
     help: 'accounts.browserLoginHelp',
     icon: 'login',
+    disabled: true,
     action: () => openBrowserLogin(),
   },
   {
@@ -831,6 +832,7 @@ const addMethods = computed<
     label: 'accounts.readBrowser',
     help: 'accounts.readBrowserHelp',
     icon: 'fingerprint',
+    disabled: true,
     action: () => openBrowserImport(),
   },
   {

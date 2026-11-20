@@ -38,13 +38,6 @@ func TestAuthRefreshKeepsAccountSource(t *testing.T) {
 	}
 	refresher := &authRuntimeRefresher{
 		pool: pool, requests: newRequestRegistry(t.Context()),
-		importCurrent: func(_ context.Context, source aistudio.AuthSource, _ aistudio.ChromeOAuthMaterial, _ string) (aistudio.StorageState, error) {
-			updated := aistudio.StorageState{Cookies: cookies}
-			updated.SetAuthExtension(aistudio.AuthExtension{
-				Source: source, OAuth: &aistudio.ChromeOAuthMaterial{GaiaID: "gaia", RefreshToken: "token"},
-			})
-			return updated, nil
-		},
 		reset: func(string) error { return nil },
 	}
 	ctx := aistudio.ContextWithAccountLease(t.Context(), lease)
@@ -68,7 +61,7 @@ func TestAuthRefreshKeepsAccountSource(t *testing.T) {
 	}
 	login := aistudio.StorageState{Cookies: cookies}
 	login.SetAuthExtension(aistudio.AuthExtension{Source: aistudio.AuthSource{Browser: "camoufox", Email: account.ID}})
-	if err := replaceAccountState(lease, login, ""); err != nil {
+	if err := replaceAccountState(lease, login); err != nil {
 		t.Fatal(err)
 	}
 	stored, err := aistudio.LoadStorageState(storage)

@@ -17,21 +17,18 @@ import (
 const (
 	defaultAuthStates         = "auth"
 	defaultListenAddr         = "127.0.0.1:2048"
-	defaultPreviewListenAddr  = "127.0.0.1:2050"
+	defaultPreviewListenAddr  = "127.0.0.1:0"
 	defaultInitTimeout        = 2 * time.Minute
 	defaultRequestTimeout     = 30 * time.Minute
-	defaultWarmWorkerLimit    = 10
-	defaultMaxActiveWorkers   = 20
-	camoufoxWarmWorkerLimit   = 5
-	camoufoxMaxActiveWorkers  = 10
-	defaultWarmConcurrency    = 5
-	defaultAccountConcurrency = 2
+	defaultWarmWorkerLimit    = 1
+	defaultMaxActiveWorkers   = 2
+	defaultWarmConcurrency    = 1
+	defaultAccountConcurrency = 1
 )
 
 var configKeys = [...]string{
 	"AISTUDIO_AUTH_STATES",
 	"LISTEN_ADDR",
-	"PREVIEW_LISTEN_ADDR",
 	"PROXY_API_KEY",
 	"API_KEY_ACCOUNTS",
 	"PROXY",
@@ -162,21 +159,17 @@ type Config struct {
 // workerDefaultKeys 是默认值随 WAA 后端变化的键
 var workerDefaultKeys = []string{"WARM_WORKER_LIMIT", "MAX_ACTIVE_WORKERS"}
 
-// defaultsFor 返回 WAA 后端为 backend 时的默认配置，Camoufox 后端的常驻预热账户数与活动 Worker 上限较小
-func defaultsFor(backend string) Config {
-	cfg := Default()
-	if backend == WAABackendCamoufox {
-		cfg.WarmWorkerLimit, cfg.MaxActiveWorkers = camoufoxWarmWorkerLimit, camoufoxMaxActiveWorkers
-	}
-	return cfg
+// defaultsFor 返回服务端 SpiderMonkey 后端的默认配置。
+func defaultsFor(_ string) Config {
+	return Default()
 }
 
 // Default 返回可直接启动的默认配置
 func Default() Config {
 	return Config{
 		AdminUsername:          "admin",
-		LogFile:                true,
-		LogMaxTotalMB:          500,
+		LogFile:                false,
+		LogMaxTotalMB:          50,
 		BuildNativeNonstream:   true,
 		NonstreamKeepalive:     true,
 		SearchModelAliases:     true,
@@ -250,7 +243,6 @@ var configSetters = map[string]func(*Config, string) error{
 	"CONTINUATION_PROMPT":      textSetter(func(c *Config) *string { return &c.ContinuationPrompt }, strings.TrimSpace),
 	"AISTUDIO_AUTH_STATES":     textSetter(func(c *Config) *string { return &c.AuthStates }, strings.TrimSpace),
 	"LISTEN_ADDR":              textSetter(func(c *Config) *string { return &c.ListenAddr }, strings.TrimSpace),
-	"PREVIEW_LISTEN_ADDR":      textSetter(func(c *Config) *string { return &c.PreviewListenAddr }, strings.TrimSpace),
 	"PROXY_API_KEY":            textSetter(func(c *Config) *string { return &c.ProxyAPIKey }, strings.TrimSpace),
 	"PROXY":                    textSetter(func(c *Config) *string { return &c.Proxy }, strings.TrimSpace),
 	"ROUTING_STRATEGY":         textSetter(func(c *Config) *string { return &c.RoutingStrategy }, strings.TrimSpace),
@@ -325,12 +317,13 @@ func setMaxAccountSwitches(c *Config, value string) error {
 	return nil
 }
 
-// setWAABackend 设置 WAA 后端，camoufox 以外的取值都使用 spidermonkey
+// setWAABackend 限定服务端部署只使用进程内 SpiderMonkey，不启动浏览器后端。
 func setWAABackend(c *Config, value string) error {
-	c.WAABackend = WAABackendSpiderMonkey
-	if lowerTrim(value) == WAABackendCamoufox {
-		c.WAABackend = WAABackendCamoufox
+	value = lowerTrim(value)
+	if value != "" && value != WAABackendSpiderMonkey {
+		return fmt.Errorf("WAA_BACKEND 仅支持 spidermonkey")
 	}
+	c.WAABackend = WAABackendSpiderMonkey
 	return nil
 }
 
@@ -349,13 +342,6 @@ var configChecks = []configCheck{
 		return nil
 	}},
 	{[]string{"LISTEN_ADDR"}, func(c Config) error { return validateListenAddr("LISTEN_ADDR", c.ListenAddr) }},
-	{[]string{"PREVIEW_LISTEN_ADDR"}, func(c Config) error { return validateListenAddr("PREVIEW_LISTEN_ADDR", c.PreviewListenAddr) }},
-	{[]string{"LISTEN_ADDR", "PREVIEW_LISTEN_ADDR"}, func(c Config) error {
-		if listenPort(c.ListenAddr) == listenPort(c.PreviewListenAddr) {
-			return fmt.Errorf("PREVIEW_LISTEN_ADDR 的端口不能与 LISTEN_ADDR 相同")
-		}
-		return nil
-	}},
 	{[]string{"PROXY"}, func(c Config) error {
 		for _, proxy := range ProxyList(c.Proxy) {
 			if err := ValidateProxy(proxy); err != nil {
@@ -427,8 +413,8 @@ var configChecks = []configCheck{
 		return err
 	}},
 	{[]string{"WAA_BACKEND"}, func(c Config) error {
-		if c.WAABackend != WAABackendCamoufox && c.WAABackend != WAABackendSpiderMonkey {
-			return fmt.Errorf("WAA_BACKEND 必须是 camoufox 或 spidermonkey")
+		if c.WAABackend != WAABackendSpiderMonkey {
+			return fmt.Errorf("WAA_BACKEND 仅支持 spidermonkey")
 		}
 		return nil
 	}},
@@ -486,9 +472,6 @@ func Load(path string) (Config, error) {
 		}
 	}
 	if _, ok := values["WAA_BACKEND"]; !ok {
-		if camoufoxOnlyAccounts(cfg.AuthStates) {
-			cfg.WAABackend = WAABackendCamoufox
-		}
 		if err := appendEnv(path, "WAA_BACKEND", cfg.WAABackend); err != nil {
 			return Config{}, err
 		}
@@ -614,7 +597,6 @@ func (c Config) envValues() map[string]string {
 		"CONTINUATION_PROMPT":      c.ContinuationPrompt,
 		"AISTUDIO_AUTH_STATES":     c.AuthStates,
 		"LISTEN_ADDR":              c.ListenAddr,
-		"PREVIEW_LISTEN_ADDR":      c.PreviewListenAddr,
 		"PROXY_API_KEY":            c.ProxyAPIKey,
 		"PROXY":                    c.Proxy,
 		"INIT_TIMEOUT":             c.InitTimeout.String(),
@@ -700,6 +682,9 @@ func appendEnv(path, key, value string) error {
 func (c Config) Validate() error {
 	if c.AdminAuthEnabled && (strings.TrimSpace(c.AdminUsername) == "" || strings.TrimSpace(c.AdminPassword) == "") {
 		return fmt.Errorf("开启管理登录需要 ADMIN_USERNAME 与 ADMIN_PASSWORD")
+	}
+	if c.AdminAuthEnabled && strings.TrimSpace(c.ProxyAPIKey) == "" {
+		return fmt.Errorf("开启管理登录的服务部署必须设置 PROXY_API_KEY")
 	}
 	for _, check := range configChecks {
 		if err := check.check(c); err != nil {

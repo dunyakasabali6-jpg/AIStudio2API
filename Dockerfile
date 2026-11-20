@@ -11,7 +11,7 @@ ARG TARGETARCH
 ARG ZIG=0.16.0
 ARG SPIDERMONKEY=v158.0.1-aistudio2api.2
 ARG LIBWEBP=v1.6.0-aistudio2api.1
-RUN apt-get update && apt-get install -y --no-install-recommends xz-utils && rm -rf /var/lib/apt/lists/* \
+RUN apt-get update && apt-get install -y --no-install-recommends xz-utils ca-certificates curl && rm -rf /var/lib/apt/lists/* \
     && curl -fsSL https://ziglang.org/download/$ZIG/zig-$(uname -m)-linux-$ZIG.tar.xz | tar -xJ -C /opt \
     && mv /opt/zig-* /opt/zig \
     && mkdir /opt/spidermonkey /opt/libwebp \
@@ -27,19 +27,18 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
     && CGO_ENABLED=1 GOOS=linux GOARCH=$TARGETARCH \
     CC="/opt/zig/zig cc -target $target-linux-musl" CXX="/opt/zig/zig c++ -target $target-linux-musl" \
     CGO_CPPFLAGS="-I/opt/spidermonkey/include -I/opt/libwebp/include" CGO_LDFLAGS="-L/opt/spidermonkey/lib -L/opt/libwebp/lib" \
-    go build -trimpath -tags netgo,osusergo -ldflags="-s -w -linkmode external -extldflags '-static -Wl,--strip-all'" -o /out/aistudio2api ./cmd/aistudio2api
+    go build -trimpath -tags netgo,osusergo,northflank -ldflags="-s -w -linkmode external -extldflags '-static -Wl,--strip-all'" -o /out/aistudio2api ./cmd/aistudio2api
 
+# Northflank/container runtime: CLI build only; no desktop GUI/X11 runtime packages.
 FROM debian:bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates tzdata \
-    libgtk-3-0 libasound2 libnss3 libdbus-glib-1-2 libxtst6 libxrandr2 libgbm1 libxkbcommon0 \
-    libpango-1.0-0 libcairo2 libxcomposite1 libxdamage1 libxfixes3 libx11-xcb1 \
-    xvfb \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates tzdata \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /data
 ENV LISTEN_ADDR=0.0.0.0:2048
-ENV PREVIEW_LISTEN_ADDR=0.0.0.0:2050
-EXPOSE 2048 2050
+ENV AISTUDIO2API_DISABLE_UPDATES=true
+ENV ADMIN_AUTH_ENABLED=true
+# HTML preview uses an OS-assigned loopback-only port; only API/admin port 2048 is public.
+EXPOSE 2048
 CMD ["aistudio2api", "-open-ui=false"]
 
 FROM runtime AS release
